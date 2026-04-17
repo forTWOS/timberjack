@@ -46,11 +46,14 @@ import (
 )
 
 const (
-	backupTimeFormat = "2006-01-02T15-04-05.000"
-	compressSuffix   = ".gz"
-	zstdSuffix       = ".zst"
-	defaultMaxSize   = 100
-	defaultFileMode  = 0o640
+	_backupFlag             = "-logbg"
+	_backupTimeFormat       = "2006-01-02T15-04-05.000"
+	compressSuffix          = ".gz"
+	zstdSuffix              = ".zst"
+	defaultMaxSize          = 100
+	defaultFileMode         = 0o640
+	_pattern                = "2006-01-02T15-04-05.000"
+	defaultRotationInterval = 24 * time.Hour
 )
 
 // ensure we always implement io.WriteCloser
@@ -100,7 +103,7 @@ type Logger struct {
 	// Filename is the file to write logs to.  Backup log files will be retained
 	// in the same directory.  It uses <processname>-timberjack.log in
 	// os.TempDir() if empty.
-	Filename string `json:"filename" yaml:"filename"`
+	// Filename string `json:"filename" yaml:"filename"`
 
 	// MaxSize is the maximum size in megabytes of the log file before it gets
 	// rotated. It defaults to 100 megabytes.
@@ -181,6 +184,13 @@ type Logger struct {
 	// Also, on non-Linux systems this might not have the desired effect.
 	FileMode os.FileMode `json:"filemode" yaml:"filemode"`
 
+	// deprecated: strftime pattern for backup filenames, e.g. "%Y-%m-%d"
+	// NOTE: pattern for backup filenames, e.g. "2006-01-02"
+	Pattern string `json:"pattern" yaml:"pattern"`
+
+	// Filename is the template for the current log file name. It use with pattern for finally filenames, e.g. "foobar_2006-01-02.log".
+	Filename string `json:"filename" yaml:"filename"`
+
 	// Internal fields
 	size                   int64     // current size of the log file
 	file                   *os.File  // current log file
@@ -191,6 +201,14 @@ type Logger struct {
 	resolvedAppendAfterExt bool
 	resolvedLocalTime      bool
 	resolvedCompression    string
+	// resolvedPattern          *strftime.Strftime
+	resolvedPattern                     string
+	resolvedFilenameWithoutExt          string
+	resolvedFilenameWithoutExtForBackup string
+	resolvedFilenameExt                 string
+	resolvedRotationInterval            time.Duration
+	lastRotationTruncateTime            time.Time // records the last time a rotation happened (for interval/scheduled).
+	lastFilename                        string    // cache the last filename to avoid unnecessary calls to pattern.FormatString when time hasn't advanced enough to change the filename
 
 	mu sync.Mutex // ensures atomic writes and rotations
 
@@ -239,12 +257,12 @@ func (l *Logger) resolveConfigLocked() {
 		// Resolve time format
 		layout := l.BackupTimeFormat
 		if layout == "" {
-			layout = backupTimeFormat
+			layout = _backupTimeFormat
 		} else if err := l.ValidateBackupTimeFormat(); err != nil {
 			fmt.Fprintf(os.Stderr,
 				"timberjack: invalid BackupTimeFormat: %v — falling back to default format: %s\n",
-				err, backupTimeFormat)
-			layout = backupTimeFormat
+				err, _backupTimeFormat)
+			layout = _backupTimeFormat
 		}
 		l.resolvedBackupLayout = layout
 		l.resolvedAppendAfterExt = l.AppendTimeAfterExt
@@ -258,6 +276,25 @@ func (l *Logger) resolveConfigLocked() {
 
 		// Freeze compression (prevents races if toggled later)
 		l.resolvedCompression = l.effectiveCompression()
+
+		if l.Filename != "" {
+			l.resolvedFilenameWithoutExt = strings.TrimSuffix(l.Filename, filepath.Ext(l.Filename))
+			l.resolvedFilenameExt = filepath.Ext(l.Filename)
+			l.resolvedFilenameWithoutExtForBackup = l.resolvedFilenameWithoutExt + "-"
+		}
+
+		if l.RotationInterval <= 0 {
+			fmt.Fprintf(os.Stderr,
+				"timberjack: non-positive RotationInterval %v is invalid — falling back to 0 (disabled)\n",
+				l.RotationInterval)
+			l.resolvedRotationInterval = defaultRotationInterval
+		} else {
+			l.resolvedRotationInterval = l.RotationInterval
+		}
+
+		if l.Pattern != "" {
+			l.resolvedPattern = l.Pattern
+		}
 	})
 }
 
@@ -528,7 +565,9 @@ func (l *Logger) runScheduledRotations(quit <-chan struct{}, slots []rotateAt, l
 			// This should ideally not happen if processedRotateAt is valid and non-empty.
 			// Could occur if currentTime() is unreliable or jumps massively backward.
 			// Log an error and retry calculation after a fallback delay.
-			fmt.Fprintf(os.Stderr, "timberjack: [%s] Could not determine next scheduled rotation time for %v with marks %v. Retrying calculation in 1 minute.\n", l.Filename, nowInLocation, slots)
+			// NOTE: filename() is safe to call here since it only accesses cached values and does not perform time-based formatting.
+			//  it is used here to provide context in the log message about which logger is affected by the issue.
+			fmt.Fprintf(os.Stderr, "timberjack: [%s] Could not determine next scheduled rotation time for %v with marks %v. Retrying calculation in 1 minute.\n", l.filename(), nowInLocation, slots)
 			select {
 			case <-time.After(time.Minute): // Wait a bit before retrying calculation
 				continue // Restart the outer loop to recalculate
@@ -548,7 +587,7 @@ func (l *Logger) runScheduledRotations(quit <-chan struct{}, slots []rotateAt, l
 			// very close to, but just before or at, this scheduled time for the same mark.
 			if l.lastRotationTime.Before(nextRotationAbsoluteTime) {
 				if err := l.rotate("time"); err != nil { // Scheduled rotations are "time" based for filename
-					fmt.Fprintf(os.Stderr, "timberjack: [%s] scheduled rotation failed: %v\n", l.Filename, err)
+					fmt.Fprintf(os.Stderr, "timberjack: [%s] scheduled rotation failed: %v\n", l.filename(), err)
 				} else {
 					l.lastRotationTime = nowFn()
 				}
@@ -679,7 +718,7 @@ func (l *Logger) RotateWithReason(reason string) error {
 	return nil
 }
 
-func backupNameWithResolved(name string, local bool, reason string, t time.Time, layout string, afterExt bool) string {
+func backupName(name string, local bool, reason string, t time.Time, layout string, afterExt bool) string {
 	dir := filepath.Dir(name)
 	filename := filepath.Base(name)
 	ext := filepath.Ext(filename)
@@ -692,11 +731,11 @@ func backupNameWithResolved(name string, local bool, reason string, t time.Time,
 	ts := t.In(loc).Format(layout)
 
 	if afterExt {
-		// <name><ext>-<ts>-<reason>
-		return filepath.Join(dir, fmt.Sprintf("%s%s-%s-%s", prefix, ext, ts, reason))
+		// <name><ext><backupflag>-<ts>-<reason>
+		return filepath.Join(dir, fmt.Sprintf("%s%s%s-%s-%s", prefix, ext, _backupFlag, ts, reason))
 	}
-	// <name>-<ts>-<reason><ext>
-	return filepath.Join(dir, fmt.Sprintf("%s-%s-%s%s", prefix, ts, reason, ext))
+	// <name><backupflag>-<ts>-<reason><ext>
+	return filepath.Join(dir, fmt.Sprintf("%s%s-%s-%s%s", prefix, _backupFlag, ts, reason, ext))
 }
 
 // openNew creates a new log file for writing.
@@ -705,6 +744,9 @@ func backupNameWithResolved(name string, local bool, reason string, t time.Time,
 // The reasonForBackup parameter is used in the backup filename.
 func (l *Logger) openNew(reasonForBackup string) error {
 	l.resolveConfigLocked() // no-op after first time
+	if l.lastRotationTruncateTime.IsZero() && l.resolvedPattern != "" {
+		l.getOrCreateFilename() // initialize lastRotationTruncateTime and lastFilename
+	}
 
 	if err := os.MkdirAll(l.dir(), 0o755); err != nil {
 		return fmt.Errorf("can't make directories for new logfile: %s", err)
@@ -729,7 +771,7 @@ func (l *Logger) openNew(reasonForBackup string) error {
 		rotationTimeForBackup := l.resolvedTimeNow()
 
 		// Build the rotated name from the immutable snapshot (no public field writes).
-		newname := backupNameWithResolved(
+		newname := backupName(
 			name,
 			l.resolvedLocalTime,
 			reasonForBackup,
@@ -748,6 +790,8 @@ func (l *Logger) openNew(reasonForBackup string) error {
 	} else {
 		return fmt.Errorf("failed to stat log file %s: %w", name, err)
 	}
+
+	name = l.getOrCreateFilename() // Recalculate in case pattern-based filename changes with time
 
 	// Create and open the new log file at path `name`.
 	f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, finalMode)
@@ -768,7 +812,7 @@ func (l *Logger) openNew(reasonForBackup string) error {
 	// Try to chown the new file to match the old file's owner/group (if there was an old file).
 	if oldInfo != nil {
 		if errChown := chown(name, oldInfo); errChown != nil {
-			fmt.Fprintf(os.Stderr, "timberjack: [%s] failed to chown new log file %s: %v\n", l.Filename, name, errChown)
+			fmt.Fprintf(os.Stderr, "timberjack: [%s] failed to chown new log file %s: %v\n", l.filename(), name, errChown)
 		}
 	}
 
@@ -790,32 +834,6 @@ func (l *Logger) shouldTimeRotate() bool {
 	return l.resolvedTimeNow().Sub(l.lastRotationTime) >= l.RotationInterval
 }
 
-// backupName creates a new backup filename by inserting a timestamp and a rotation reason
-// ("time" or "size") between the filename prefix and the extension.
-// It uses the local time if requested (otherwise UTC).
-func backupName(name string, local bool, reason string, t time.Time, fileTimeFormat string, appendTimeAfterExt bool) string {
-	dir := filepath.Dir(name)
-	filename := filepath.Base(name)
-	ext := filepath.Ext(filename)
-	prefix := filename[:len(filename)-len(ext)]
-
-	currentLoc := time.UTC
-	if local {
-		currentLoc = time.Local
-	}
-	// Format the timestamp for the backup file.
-	timestamp := t.In(currentLoc).Format(fileTimeFormat)
-
-	if appendTimeAfterExt {
-		// <name><ext>-<ts>-<reason>
-		// e.g. httpd.log-2025-01-01T00-00-00.000-size
-		return filepath.Join(dir, fmt.Sprintf("%s%s-%s-%s", prefix, ext, timestamp, reason))
-	}
-
-	// default: <name>-<ts>-<reason><ext>
-	return filepath.Join(dir, fmt.Sprintf("%s-%s-%s%s", prefix, timestamp, reason, ext))
-}
-
 // openExistingOrNew opens the existing logfile if it exists and the current write
 // would not cause it to exceed MaxSize. If the file does not exist, or if writing
 // would exceed MaxSize, the current file is rotated (if it exists) and a new logfile is created.
@@ -824,7 +842,7 @@ func (l *Logger) openExistingOrNew(writeLen int) error {
 	l.resolveConfigLocked()
 	l.mill() // Perform house-keeping for old logs (compression, deletion) first.
 
-	filename := l.filename()
+	filename := l.getOrCreateFilename()
 	info, err := l.resolvedStat(filename)
 	if os.IsNotExist(err) {
 		// File doesn't exist, so openNew is creating a new file.
@@ -855,14 +873,65 @@ func (l *Logger) openExistingOrNew(writeLen int) error {
 	return nil
 }
 
+func (l *Logger) CoarseFilename() string {
+	return l.filename()
+}
+
 // filename returns the current log filename, using the configured Filename,
 // or a default based on the process name if Filename is empty.
 func (l *Logger) filename() string {
+	if l.lastFilename != "" {
+		return l.lastFilename
+	}
 	if l.Filename != "" {
 		return l.Filename
 	}
 	name := filepath.Base(os.Args[0]) + "-timberjack.log"
 	return filepath.Join(os.TempDir(), name)
+}
+
+func (l *Logger) getOrCreateFilename() string {
+	if l.resolvedPattern == "" {
+		return l.filename()
+	}
+
+	now := l.resolvedTimeNow()
+
+	base := TruncateBaseTimeToRotationInterval(now, l.resolvedRotationInterval)
+
+	if l.lastRotationTruncateTime.Equal(base) {
+		return l.lastFilename
+	}
+	l.lastRotationTruncateTime = base
+	l.lastFilename = fmt.Sprintf("%s-%s%s", l.resolvedFilenameWithoutExt, base.Format(l.resolvedPattern), l.resolvedFilenameExt) //l.resolvedPattern.FormatString(base)
+	return l.lastFilename
+}
+
+func TruncateBaseTimeToRotationInterval(now time.Time, resolvedRotationInterval time.Duration) (base time.Time) {
+	// XXX HACK: Truncate only happens in UTC semantics, apparently.
+	// observed values for truncating given time with 86400 secs:
+	//
+	// before truncation: 2018/06/01 03:54:54 2018-06-01T03:18:00+09:00
+	// after  truncation: 2018/06/01 03:54:54 2018-05-31T09:00:00+09:00
+	//
+	// This is really annoying when we want to truncate in local time
+	// so we hack: we take the apparent local time in the local zone,
+	// and pretend that it's in UTC. do our math, and put it back to
+	// the local zone
+	if now.Location() != time.UTC {
+		base = time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), now.Minute(), now.Second(), now.Nanosecond(), time.UTC)
+		base = base.Truncate(resolvedRotationInterval)
+		base = time.Date(base.Year(), base.Month(), base.Day(), base.Hour(), base.Minute(), base.Second(), base.Nanosecond(), base.Location())
+	} else {
+		base = now.Truncate(resolvedRotationInterval)
+	}
+	return base
+}
+
+// ToolGenFilename is a helper function that generates a filename based on the provided strftime pattern, current time, and rotation interval.
+// It's a test tool to verify the filename generation logic independently of the Logger struct.
+func ToolGenFilename(filename, pattern string, now time.Time, rotationInterval time.Duration) string {
+	return fmt.Sprintf("%s-%s%s", strings.TrimSuffix(filename, filepath.Ext(filename)), TruncateBaseTimeToRotationInterval(now, rotationInterval).Format(pattern), filepath.Ext(filename))
 }
 
 // millRunOnce performs one cycle of compression and removal of old log files.
@@ -970,7 +1039,7 @@ func (l *Logger) millRunOnce() error {
 	for _, f := range finalUniqueRemovals {
 		errRemove := l.resolvedRemove(filepath.Join(l.dir(), f.Name()))
 		if errRemove != nil && !os.IsNotExist(errRemove) {
-			fmt.Fprintf(os.Stderr, "timberjack: [%s] failed to remove old log file %s: %v\n", l.Filename, f.Name(), errRemove)
+			fmt.Fprintf(os.Stderr, "timberjack: [%s] failed to remove old log file %s: %v\n", l.filename(), f.Name(), errRemove)
 		}
 	}
 
@@ -979,7 +1048,7 @@ func (l *Logger) millRunOnce() error {
 	for _, f := range filesToCompress {
 		fn := filepath.Join(l.dir(), f.Name())
 		if errCompress := l.compressLogFile(fn, fn+suffix); errCompress != nil {
-			fmt.Fprintf(os.Stderr, "timberjack: [%s] failed to compress log file %s: %v\n", l.Filename, f.Name(), errCompress)
+			fmt.Fprintf(os.Stderr, "timberjack: [%s] failed to compress log file %s: %v\n", l.filename(), f.Name(), errCompress)
 		}
 	}
 	return nil
@@ -1060,20 +1129,25 @@ func (l *Logger) oldLogFiles() ([]logInfo, error) {
 }
 
 // timeFromName extracts the formatted timestamp from the backup filename.
-// It expects filenames like "prefix-YYYY-MM-DDTHH-MM-SS.mmm-reason.ext" or "prefix.ext-YYYY-MM-DDTHH-MM-SS.mmm-reason[.gz]"
+// deprecated: It expects filenames like "prefix-YYYY-MM-DDTHH-MM-SS.mmm-reason.ext" or "prefix.ext-YYYY-MM-DDTHH-MM-SS.mmm-reason[.gz]"
+// It expects filenames like "prefix-YYYY-MM-DDTHH-MM-SS.mmm-reason-backupflag.ext" or "prefix-YYYY-MM-DDTHH-MM-SS.mmm.ext-reason-backupflag[.gz]"
+// prefix like "base(Filename)-", .e.g: "farboo-"
 func (l *Logger) timeFromName(filename, prefix, ext string) (time.Time, error) {
 	layout := l.resolvedBackupLayout
 	if layout == "" {
 		// defensive default if called very early
-		layout = backupTimeFormat
+		layout = _backupTimeFormat
 	}
 	loc := time.UTC
 	if l.resolvedLocalTime {
 		loc = time.Local
 	}
 
+	backupIndex := strings.Index(filename, _backupFlag)
+	if backupIndex == -1 {
+		return time.Time{}, errors.New("backup flag not found in filename")
+	}
 	if !l.resolvedAppendAfterExt {
-
 		// Keep legacy behavior for error messages to satisfy existing tests
 		if !strings.HasPrefix(filename, prefix) {
 			return time.Time{}, errors.New("mismatched prefix")
@@ -1081,8 +1155,12 @@ func (l *Logger) timeFromName(filename, prefix, ext string) (time.Time, error) {
 		if !strings.HasSuffix(filename, ext) {
 			return time.Time{}, errors.New("mismatched extension")
 		}
-		// "<prefix><timestamp>-<reason><ext>"
-		trimmed := filename[len(prefix) : len(filename)-len(ext)]
+		// "<prefix><backupflag><timestamp>-<reason><ext>"
+		// filename: prefix-backupflag-2025-01-06T12-00-00.000-reason.log
+		if len(filename) <= backupIndex+len(_backupFlag)+len(ext) {
+			return time.Time{}, fmt.Errorf("malformed backup filename: too short to contain timestamp and reason in %q", filename)
+		}
+		trimmed := filename[backupIndex+len(_backupFlag)+1 : len(filename)-len(ext)]
 		lastHyphenIdx := strings.LastIndex(trimmed, "-")
 		if lastHyphenIdx == -1 {
 			return time.Time{}, fmt.Errorf("malformed backup filename: missing reason separator in %q", trimmed)
@@ -1092,19 +1170,21 @@ func (l *Logger) timeFromName(filename, prefix, ext string) (time.Time, error) {
 	}
 
 	// After-ext parsing:
-	// base is "<name><ext>" (e.g., "foo.log")
-	base := prefix[:len(prefix)-1] + ext
+	// format is "<name><ext>" (e.g., "foo-YYYY-MM-DD_HH.log")
 
 	// Allow optional trailing compression suffix (".gz" or ".zst")
 	nameNoComp := trimCompressionSuffix(filename)
 
 	// nameNoComp must start with "<base>-"
-	if !strings.HasPrefix(nameNoComp, base+"-") {
+	if !strings.HasPrefix(nameNoComp, prefix) {
 		return time.Time{}, fmt.Errorf("malformed backup filename: %q", filename)
 	}
 
-	// nameNoComp = "<base>-<timestamp>-<reason>"
-	trimmed := nameNoComp[len(base)+1:]
+	// nameNoComp = "<base><backupflag><timestamp>-<reason>"
+	if len(filename) <= len(prefix)+len(_backupFlag)+len(ext) {
+		return time.Time{}, fmt.Errorf("malformed backup filename: too short to contain timestamp and reason in %q", filename)
+	}
+	trimmed := nameNoComp[backupIndex+len(_backupFlag)+1:]
 
 	lastHyphenIdx := strings.LastIndex(trimmed, "-")
 	if lastHyphenIdx == -1 {
@@ -1129,11 +1209,14 @@ func (l *Logger) dir() string {
 
 // prefixAndExt returns the filename part (up to the extension, with a trailing dash for backups)
 // and extension part from the Logger's filename.
-// e.g., for "foo.log", returns "foo-", ".log"
+// e.g., for "foo.log", returns "foo-", "foo-YYYY-MM-DD_HH", ".log"
 func (l *Logger) prefixAndExt() (prefix, ext string) {
+	if l.resolvedFilenameWithoutExtForBackup != "" && l.resolvedFilenameExt != "" {
+		return filepath.Base(l.resolvedFilenameWithoutExtForBackup), l.resolvedFilenameExt
+	}
 	filename := filepath.Base(l.filename())
 	ext = filepath.Ext(filename)
-	prefix = filename[:len(filename)-len(ext)] + "-" // Add dash as backup filenames include it after original prefix
+	prefix = filename[:len(filename)-len(ext)] // + "-" // Add dash as backup filenames include it after original prefix
 	return prefix, ext
 }
 

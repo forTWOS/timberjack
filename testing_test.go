@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"runtime"
 	"testing"
+	"time"
 )
 
 // assert will log the given message if condition is false.
@@ -90,7 +91,14 @@ func _isNil(obtained interface{}) bool {
 	return false
 }
 
+// foobar_2025-01-01_00-2025-01-01T00-00-01.000-size.log
+// foobar-2025-01-01T00-00-01.000-size.log
+// foobar-2025-01-01T00-00-01.000-size.log
 // backupFileWithReason returns a backup file name with the given reason.
-func backupFileWithReason(dir, reason string) string {
-	return filepath.Join(dir, fmt.Sprintf("foobar-%s-%s.log", fakeTime().UTC().Format("2006-01-02T15-04-05.000"), reason))
+func backupFileWithReason(dir, reason string, t time.Time) string {
+	return filepath.Join(dir, fmt.Sprintf("foobar-%s%s-%s-%s.log", TruncateBaseTimeToRotationInterval(t, defaultRotationInterval).UTC().Format(getPattern()), _backupFlag, fakeTime().UTC().Format(_backupTimeFormat), reason))
+}
+
+func backupFileWithReasonFilename(dir, reason, filename string, t time.Time) string {
+	return filepath.Join(dir, fmt.Sprintf("%s-%s%s-%s-%s.log", filename, TruncateBaseTimeToRotationInterval(t, defaultRotationInterval).UTC().Format(getPattern()), _backupFlag, fakeTime().UTC().Format(_backupTimeFormat), reason))
 }

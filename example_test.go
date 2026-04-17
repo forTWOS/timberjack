@@ -10,6 +10,7 @@ import (
 func Example() {
 	log.SetOutput(&Logger{
 		Filename:         "/var/log/myapp/foo.log",
+		Pattern:          "2006-01-02T15-04-05.000",
 		MaxSize:          500,            // megabytes
 		MaxBackups:       3,              // number of backups
 		MaxAge:           28,             // days
