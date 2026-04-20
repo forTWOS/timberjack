@@ -63,14 +63,15 @@ func TestOpenNewDefaultPerm(t *testing.T) {
 	dir := makeTempDir("TestOpenNewDefaultPerm", t)
 	defer os.RemoveAll(dir)
 
+	filename := logFile(dir)
 	l := &Logger{
-		Filename: logFile(dir),
+		Filename: filename,
 	}
 	defer l.Close()
 
 	_, err := l.Write([]byte("foo"))
 	isNil(err, t)
-	hasPerm(logFile(dir), 0o640, t)
+	hasPerm(l.CoarseFilename(), 0o640, t)
 }
 
 func TestOpenNewCustomPerm(t *testing.T) {
@@ -87,7 +88,7 @@ func TestOpenNewCustomPerm(t *testing.T) {
 	}
 	_, err := l.Write([]byte("foo"))
 	isNil(err, t)
-	hasPerm(filename, 0o747, t)
+	hasPerm(l.CoarseFilename(), 0o747, t)
 	l.Close()
 
 	filename += ".1"
@@ -97,7 +98,7 @@ func TestOpenNewCustomPerm(t *testing.T) {
 	}
 	_, err = l.Write([]byte("foo"))
 	isNil(err, t)
-	hasPerm(filename, 0o200, t)
+	hasPerm(l.CoarseFilename(), 0o200, t)
 	l.Close()
 
 	filename += ".2"
@@ -107,6 +108,6 @@ func TestOpenNewCustomPerm(t *testing.T) {
 	}
 	_, err = l.Write([]byte("foo"))
 	isNil(err, t)
-	hasPerm(filename, 0o666, t)
+	hasPerm(l.CoarseFilename(), 0o666, t)
 	l.Close()
 }

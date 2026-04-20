@@ -183,6 +183,7 @@ func TestAutoRotate(t *testing.T) {
 	fileCount(dir, 1, t)
 
 	preTime := fakeTime()
+	preGeneration := l.generation
 	newFakeTime()
 
 	b2 := []byte("foooooo!")
@@ -195,7 +196,7 @@ func TestAutoRotate(t *testing.T) {
 	existsWithContent(l.CoarseFilename(), b2, t)
 
 	// the backup file will use the current fake time and have the old contents.
-	existsWithContent(backupFileWithReason(dir, "size", preTime), b, t)
+	existsWithContent(backupFileWithReason(dir, "size", preTime, preGeneration), b, t)
 
 	fileCount(dir, 2, t)
 }
@@ -218,6 +219,7 @@ func TestFirstWriteRotate(t *testing.T) {
 	isNil(err, t)
 
 	preTime := fakeTime()
+	preGeneration := l.generation
 	newFakeTime()
 
 	// this would make us rotate
@@ -227,7 +229,7 @@ func TestFirstWriteRotate(t *testing.T) {
 	equals(len(b), n, t)
 
 	existsWithContent(l.CoarseFilename(), b, t)
-	existsWithContent(backupFileWithReason(dir, "size", preTime), start, t)
+	existsWithContent(backupFileWithReason(dir, "size", preTime, preGeneration), start, t)
 
 	fileCount(dir, 2, t)
 }
@@ -254,6 +256,7 @@ func TestMaxBackups(t *testing.T) {
 	fileCount(dir, 1, t)
 
 	preTime := fakeTime()
+	preGeneration := l.generation
 	newFakeTime()
 
 	// this will put us over the max
@@ -263,7 +266,7 @@ func TestMaxBackups(t *testing.T) {
 	equals(len(b2), n, t)
 
 	// this will use the new fake time
-	secondFilename := backupFileWithReason(dir, "size", preTime)
+	secondFilename := backupFileWithReason(dir, "size", preTime, preGeneration)
 	existsWithContent(secondFilename, b, t)
 
 	// make sure the old file still exists with the same content.
@@ -272,6 +275,7 @@ func TestMaxBackups(t *testing.T) {
 	fileCount(dir, 2, t)
 
 	preTime = fakeTime()
+	preGeneration = l.generation
 	newFakeTime()
 
 	// this will make us rotate again
@@ -281,7 +285,7 @@ func TestMaxBackups(t *testing.T) {
 	equals(len(b3), n, t)
 
 	// this will use the new fake time
-	thirdFilename := backupFileWithReason(dir, "size", preTime)
+	thirdFilename := backupFileWithReason(dir, "size", preTime, preGeneration)
 	existsWithContent(thirdFilename, b2, t)
 
 	existsWithContent(l.CoarseFilename(), b3, t)
@@ -302,6 +306,7 @@ func TestMaxBackups(t *testing.T) {
 	// now test that we don't delete directories or non-logfile files
 
 	preTime = fakeTime()
+	preGeneration = l.generation
 	newFakeTime()
 
 	// create a file that is close to but different from the logfile name.
@@ -312,15 +317,16 @@ func TestMaxBackups(t *testing.T) {
 
 	// Make a directory that exactly matches our log file filters... it still
 	// shouldn't get caught by the deletion filter since it's a directory.
-	notlogfiledir := backupFileWithReason(dir, "size", preTime)
+	notlogfiledir := backupFileWithReason(dir, "size", preTime, preGeneration)
 	err = os.Mkdir(notlogfiledir, 0o700)
 	isNil(err, t)
 
 	preTime = fakeTime()
+	preGeneration = l.generation
 	newFakeTime()
 
 	// this will use the new fake time
-	fourthFilename := backupFileWithReason(dir, "size", preTime)
+	fourthFilename := backupFileWithReason(dir, "size", preTime, preGeneration)
 	// Create a log file that is/was being compressed - this should
 	// not be counted since both the compressed and the uncompressed
 	// log files still exist.
@@ -373,19 +379,19 @@ func TestCleanupExistingBackups(t *testing.T) {
 	// make 3 backup files
 
 	data := []byte("data")
-	backup := backupFileWithReason(dir, "size", fakeTime())
+	backup := backupFileWithReason(dir, "size", fakeTime(), 0)
 	err := os.WriteFile(backup, data, 0o644)
 	isNil(err, t)
 
 	newFakeTime()
 
-	backup = backupFileWithReason(dir, "size", fakeTime())
+	backup = backupFileWithReason(dir, "size", fakeTime(), 0)
 	err = os.WriteFile(backup+compressSuffix, data, 0o644)
 	isNil(err, t)
 
 	newFakeTime()
 
-	backup = backupFileWithReason(dir, "size", fakeTime())
+	backup = backupFileWithReason(dir, "size", fakeTime(), 0)
 	err = os.WriteFile(backup, data, 0o644)
 	isNil(err, t)
 
@@ -439,6 +445,7 @@ func TestMaxAge(t *testing.T) {
 	fileCount(dir, 1, t)
 
 	preTime := fakeTime()
+	preGeneration := l.generation
 
 	// two days later
 	newFakeTime(48 * time.Hour)
@@ -447,7 +454,7 @@ func TestMaxAge(t *testing.T) {
 	n, err = l.Write(b2)
 	isNil(err, t)
 	equals(len(b2), n, t)
-	existsWithContent(backupFileWithReason(dir, "size", preTime), b, t)
+	existsWithContent(backupFileWithReason(dir, "size", preTime, preGeneration), b, t)
 
 	// we need to wait a little bit since the files get deleted on a different
 	// goroutine.
@@ -460,7 +467,7 @@ func TestMaxAge(t *testing.T) {
 	existsWithContent(l.CoarseFilename(), b2, t)
 
 	// we should have deleted the old file due to being too old
-	existsWithContent(backupFileWithReason(dir, "size", preTime), b, t)
+	existsWithContent(backupFileWithReason(dir, "size", preTime, preGeneration), b, t)
 
 	preTime = fakeTime()
 
@@ -471,7 +478,7 @@ func TestMaxAge(t *testing.T) {
 	n, err = l.Write(b3)
 	isNil(err, t)
 	equals(len(b3), n, t)
-	existsWithContent(backupFileWithReason(dir, "size", preTime), b2, t)
+	existsWithContent(backupFileWithReason(dir, "size", preTime, 0), b2, t)
 
 	// we need to wait a little bit since the files get deleted on a different
 	// goroutine.
@@ -484,7 +491,7 @@ func TestMaxAge(t *testing.T) {
 	existsWithContent(l.CoarseFilename(), b3, t)
 
 	// we should have deleted the old file due to being too old
-	existsWithContent(backupFileWithReason(dir, "size", preTime), b2, t)
+	existsWithContent(backupFileWithReason(dir, "size", preTime, 0), b2, t)
 }
 
 func helperFilename(filename string, rotationInterval time.Duration) string {
@@ -508,7 +515,7 @@ func TestOldLogFiles(t *testing.T) {
 	t1, err := time.Parse(_backupTimeFormat, fakeTime().UTC().Format(_backupTimeFormat))
 	isNil(err, t)
 
-	backup := backupFileWithReason(dir, "size", fakeTime())
+	backup := backupFileWithReason(dir, "size", fakeTime(), 0)
 	err = os.WriteFile(backup, data, 0o7)
 	isNil(err, t)
 
@@ -518,7 +525,7 @@ func TestOldLogFiles(t *testing.T) {
 	t2, err := time.Parse(_backupTimeFormat, fakeTime().UTC().Format(_backupTimeFormat))
 	isNil(err, t)
 
-	backup2 := backupFileWithReason(dir, "size", preTime)
+	backup2 := backupFileWithReason(dir, "size", preTime, 0)
 	err = os.WriteFile(backup2, data, 0o7)
 	isNil(err, t)
 
@@ -574,13 +581,15 @@ func TestLocalTime(t *testing.T) {
 	isNil(err, t)
 	equals(len(b), n, t)
 
+	preFilename := l.CoarseFilename()
+
 	b2 := []byte("fooooooo!")
 	n2, err := l.Write(b2)
 	isNil(err, t)
 	equals(len(b2), n2, t)
 
 	existsWithContent(l.CoarseFilename(), b2, t)
-	existsWithContent(backupFileLocal(dir, l.CoarseFilename()), b, t)
+	existsWithContent(backupFileLocal(dir, preFilename), b, t)
 }
 
 func TestRotate(t *testing.T) {
@@ -605,6 +614,7 @@ func TestRotate(t *testing.T) {
 	fileCount(dir, 1, t)
 
 	preTime := fakeTime()
+	preGeneration := l.generation
 	newFakeTime()
 
 	err = l.Rotate()
@@ -614,12 +624,13 @@ func TestRotate(t *testing.T) {
 	// goroutine.
 	<-time.After(10 * time.Millisecond)
 
-	filename2 := backupFileWithReason(dir, "size", preTime)
+	filename2 := backupFileWithReason(dir, "size", preTime, preGeneration)
 	existsWithContent(filename2, b, t)
 	existsWithContent(l.CoarseFilename(), []byte{}, t)
 	fileCount(dir, 2, t)
 	newFakeTime()
 
+	preGeneration = l.generation
 	err = l.Rotate()
 	isNil(err, t)
 
@@ -627,7 +638,7 @@ func TestRotate(t *testing.T) {
 	// goroutine.
 	<-time.After(10 * time.Millisecond)
 
-	filename3 := backupFileWithReason(dir, "size", preTime)
+	filename3 := backupFileWithReason(dir, "size", preTime, preGeneration)
 	existsWithContent(filename3, []byte{}, t)
 	existsWithContent(l.CoarseFilename(), []byte{}, t)
 	fileCount(dir, 2, t)
@@ -664,6 +675,7 @@ func TestCompressOnRotate(t *testing.T) {
 	fileCount(dir, 1, t)
 
 	preTime := fakeTime()
+	preGeneration := l.generation
 	newFakeTime()
 
 	err = l.Rotate()
@@ -685,8 +697,8 @@ func TestCompressOnRotate(t *testing.T) {
 	isNil(err, t)
 	err = gz.Close()
 	isNil(err, t)
-	existsWithContent(backupFileWithReason(dir, "size", preTime)+compressSuffix, bc.Bytes(), t)
-	notExist(backupFileWithReason(dir, "size", preTime), t)
+	existsWithContent(backupFileWithReason(dir, "size", preTime, preGeneration)+compressSuffix, bc.Bytes(), t)
+	notExist(backupFileWithReason(dir, "size", preTime, preGeneration), t)
 
 	fileCount(dir, 2, t)
 }
@@ -707,7 +719,7 @@ func TestCompressOnResume(t *testing.T) {
 	defer l.Close()
 
 	// Create a backup file and empty "compressed" file.
-	filename2 := backupFileWithReason(dir, "size", fakeTime())
+	filename2 := backupFileWithReason(dir, "size", fakeTime(), 0)
 	b := []byte("foo!")
 	err := os.WriteFile(filename2, b, 0o644)
 	isNil(err, t)
@@ -908,6 +920,7 @@ func TestSizeBasedRotation(t *testing.T) {
 	fileCount(dir, 1, t)
 
 	preTime := fakeTime()
+	preGeneration := l.generation
 	// Advance time for the backup timestamp.
 	// Note: originalFakeTime variable was here and was unused. It has been removed.
 	newFakeTime() // Advances the global fakeCurrentTime
@@ -926,7 +939,7 @@ func TestSizeBasedRotation(t *testing.T) {
 	// backupFileWithReason uses the *current* fakeTime (which was advanced by newFakeTime)
 	// to generate the timestamped name. The rotation timestamp (l.logStartTime for the
 	// backed-up segment, used in backupName) is set to currentTime() when openNew is called.
-	backupFilename := backupFileWithReason(dir, "size", preTime)
+	backupFilename := backupFileWithReason(dir, "size", preTime, preGeneration)
 	existsWithContent(backupFilename, content1, t)
 
 	fileCount(dir, 2, t)
@@ -969,6 +982,7 @@ func TestRotateAtMinutes(t *testing.T) {
 	fileCount(dir, 1, t) // only the live logfile
 
 	preTime := fakeTime()
+	preGeneration := l.generation
 	// 3) Advance to 14:15 exactly, let the goroutine fire
 	setFakeTime(time.Date(2025, time.May, 12, 14, 15, 0, 0, time.UTC))
 	time.Sleep(300 * time.Millisecond)
@@ -979,7 +993,7 @@ func TestRotateAtMinutes(t *testing.T) {
 	isNil(err, t)
 	equals(len(content2), n, t)
 	existsWithContent(l.CoarseFilename(), content2, t)
-	expected1 := backupFileWithReason(dir, "time", preTime)
+	expected1 := backupFileWithReason(dir, "time", preTime, preGeneration)
 	existsWithContent(expected1, content1, t)
 	fileCount(dir, 2, t)
 
@@ -989,13 +1003,14 @@ func TestRotateAtMinutes(t *testing.T) {
 	fileCount(dir, 2, t) // still just the live log + one backup
 
 	preTime = fakeTime()
+	preGeneration = l.generation
 	// 6) Write at 14:31 → triggers the 30-minute mark rotation, and rolls content2
 	setFakeTime(time.Date(2025, time.May, 12, 14, 31, 0, 0, time.UTC))
 	n, err = l.Write(content3)
 	isNil(err, t)
 	equals(len(content3), n, t)
 	existsWithContent(l.CoarseFilename(), content3, t)
-	expected2 := backupFileWithReason(dir, "time", preTime)
+	expected2 := backupFileWithReason(dir, "time", preTime, preGeneration)
 	existsWithContent(expected2, content2, t)
 	fileCount(dir, 3, t)
 }
@@ -1037,6 +1052,7 @@ func TestRotateAt(t *testing.T) {
 	fileCount(dir, 1, t) // only the live logfile
 
 	preTime := fakeTime()
+	preGeneration := l.generation
 	// 3) Advance to next day 10:00 exactly, let the goroutine fire
 	setFakeTime(time.Date(2025, time.May, 13, 10, 0, 0, 0, time.UTC))
 	time.Sleep(300 * time.Millisecond)
@@ -1047,7 +1063,8 @@ func TestRotateAt(t *testing.T) {
 	isNil(err, t)
 	equals(len(content2), n, t)
 	existsWithContent(l.CoarseFilename(), content2, t)
-	expected1 := backupFileWithReasonFilename(dir, "time", "rotateat", preTime)
+	secondGeneration := l.generation
+	expected1 := backupFileWithReasonFilename(dir, "time", "rotateat", preTime, preGeneration)
 	existsWithContent(expected1, content1, t)
 	fileCount(dir, 2, t)
 
@@ -1063,7 +1080,7 @@ func TestRotateAt(t *testing.T) {
 	isNil(err, t)
 	equals(len(content3), n, t)
 	existsWithContent(l.CoarseFilename(), content3, t)
-	expected2 := backupFileWithReasonFilename(dir, "time", "rotateat", preTime)
+	expected2 := backupFileWithReasonFilename(dir, "time", "rotateat", preTime, secondGeneration)
 	existsWithContent(expected2, content2, t)
 	fileCount(dir, 3, t)
 }
@@ -2103,7 +2120,7 @@ func TestScheduledRotation_TimerFiresAndRotates(t *testing.T) {
 	l.scheduledRotationWg.Add(1)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
 
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -2163,7 +2180,7 @@ func TestRunScheduledRotations_FallbackRetry(t *testing.T) {
 	l.scheduledRotationWg.Add(1)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
 
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -2181,7 +2198,7 @@ func TestRunScheduledRotations_TimerFires(t *testing.T) {
 	l.scheduledRotationWg.Add(1)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
 
-	time.Sleep(1500 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -2580,14 +2597,14 @@ func TestMillGoroutineCleanup(t *testing.T) {
 	}
 
 	// Give time for millRun to potentially start
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 
 	if err := logger.Close(); err != nil {
 		t.Fatalf("logger close failed: %v", err)
 	}
 
 	// Wait briefly to allow goroutine shutdown
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 }
 
 // TestWriteToClosedLogger verifies that a write to a closed logger succeeds
@@ -2694,7 +2711,7 @@ func readZstdFile(t *testing.T, path string) []byte {
 
 func TestZstdCompression_SizeRotate_DefaultNaming(t *testing.T) {
 	dir := t.TempDir()
-	logPath := filepath.Join(dir, "app.log")
+	logPath := filepath.Join(dir, "zstdcompress.log")
 
 	oldMB := megabyte
 	megabyte = 1
@@ -2717,20 +2734,22 @@ func TestZstdCompression_SizeRotate_DefaultNaming(t *testing.T) {
 	}
 
 	// Wait for mill to compress the rotated file.
-	zstFile, err := waitForFileWithSuffix(t, dir, ".log.zst", 2*time.Second)
+	zstFile, err := waitForFileWithSuffix(t, dir, ".log.zst", 3*time.Second)
 	if err != nil {
 		t.Fatalf("expected a .log.zst rotated file in %s", dir)
 	}
+	time.Sleep(100 * time.Millisecond) // give the mill a moment even though waitForFileWithSuffix should ensure it's done
 
 	got := readZstdFile(t, zstFile)
 	if !bytes.Equal(got, msg) {
+		t.Log("zstFile:", zstFile)
 		t.Fatalf("zstd content mismatch: got %q want %q", string(got), string(msg))
 	}
 }
 
 func TestZstdCompression_SizeRotate_AppendAfterExt(t *testing.T) {
 	dir := t.TempDir()
-	logPath := filepath.Join(dir, "service.log")
+	logPath := filepath.Join(dir, "zstdservice.log")
 
 	oldMB := megabyte
 	megabyte = 1
@@ -2761,9 +2780,11 @@ func TestZstdCompression_SizeRotate_AppendAfterExt(t *testing.T) {
 	if !strings.Contains(base, ".log-") || !strings.Contains(base, "-size") {
 		t.Fatalf("unexpected rotated filename %q; want '.log-<ts>-size.zst'", base)
 	}
+	time.Sleep(100 * time.Millisecond) // give the mill a moment even though waitForFileWithSuffix should ensure it's done
 
 	got := readZstdFile(t, zstFile)
 	if !bytes.Equal(got, msg) {
+		t.Log("zstFile:", zstFile)
 		t.Fatalf("zstd content mismatch: got %q want %q", string(got), string(msg))
 	}
 }

@@ -209,6 +209,7 @@ type Logger struct {
 	resolvedRotationInterval            time.Duration
 	lastRotationTruncateTime            time.Time // records the last time a rotation happened (for interval/scheduled).
 	lastFilename                        string    // cache the last filename to avoid unnecessary calls to pattern.FormatString when time hasn't advanced enough to change the filename
+	generation                          int
 
 	mu sync.Mutex // ensures atomic writes and rotations
 
@@ -283,17 +284,19 @@ func (l *Logger) resolveConfigLocked() {
 			l.resolvedFilenameWithoutExtForBackup = l.resolvedFilenameWithoutExt + "-"
 		}
 
+		if l.Pattern != "" {
+			l.resolvedPattern = l.Pattern
+		} else {
+			l.resolvedPattern = _pattern
+		}
+
 		if l.RotationInterval <= 0 {
-			fmt.Fprintf(os.Stderr,
-				"timberjack: non-positive RotationInterval %v is invalid — falling back to 0 (disabled)\n",
-				l.RotationInterval)
+			// fmt.Fprintf(os.Stderr,
+			// 	"timberjack: non-positive RotationInterval %v is invalid — falling back to %s\n",
+			// 	l.RotationInterval, defaultRotationInterval)
 			l.resolvedRotationInterval = defaultRotationInterval
 		} else {
 			l.resolvedRotationInterval = l.RotationInterval
-		}
-
-		if l.Pattern != "" {
-			l.resolvedPattern = l.Pattern
 		}
 	})
 }
@@ -752,7 +755,7 @@ func (l *Logger) openNew(reasonForBackup string) error {
 		return fmt.Errorf("can't make directories for new logfile: %s", err)
 	}
 
-	name := l.filename()
+	oldname := l.filename()
 
 	finalMode := l.FileMode
 	if finalMode == 0 {
@@ -760,7 +763,7 @@ func (l *Logger) openNew(reasonForBackup string) error {
 	}
 
 	var oldInfo os.FileInfo
-	info, err := l.resolvedStat(name)
+	info, err := l.resolvedStat(oldname)
 	if err == nil {
 		oldInfo = info
 		// Only use the existing file's mode when no explicit FileMode is configured.
@@ -772,7 +775,7 @@ func (l *Logger) openNew(reasonForBackup string) error {
 
 		// Build the rotated name from the immutable snapshot (no public field writes).
 		newname := backupName(
-			name,
+			oldname,
 			l.resolvedLocalTime,
 			reasonForBackup,
 			rotationTimeForBackup,
@@ -780,7 +783,7 @@ func (l *Logger) openNew(reasonForBackup string) error {
 			l.resolvedAppendAfterExt,
 		)
 
-		if errRename := l.resolvedRename(name, newname); errRename != nil {
+		if errRename := l.resolvedRename(oldname, newname); errRename != nil {
 			return fmt.Errorf("can't rename log file: %s", errRename)
 		}
 		l.logStartTime = rotationTimeForBackup
@@ -788,10 +791,10 @@ func (l *Logger) openNew(reasonForBackup string) error {
 		l.logStartTime = l.resolvedTimeNow()
 		oldInfo = nil
 	} else {
-		return fmt.Errorf("failed to stat log file %s: %w", name, err)
+		return fmt.Errorf("failed to stat log file %s: %w", oldname, err)
 	}
 
-	name = l.getOrCreateFilename() // Recalculate in case pattern-based filename changes with time
+	name := l.getOrCreateFilename() // Recalculate in case pattern-based filename changes with time
 
 	// Create and open the new log file at path `name`.
 	f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, finalMode)
@@ -891,7 +894,7 @@ func (l *Logger) filename() string {
 }
 
 func (l *Logger) getOrCreateFilename() string {
-	if l.resolvedPattern == "" {
+	if l.resolvedPattern == "" || l.Filename == "" {
 		return l.filename()
 	}
 
@@ -900,10 +903,15 @@ func (l *Logger) getOrCreateFilename() string {
 	base := TruncateBaseTimeToRotationInterval(now, l.resolvedRotationInterval)
 
 	if l.lastRotationTruncateTime.Equal(base) {
+		if !l.lastRotationTruncateTime.IsZero() {
+			l.generation++
+		}
+		l.lastFilename = fmt.Sprintf("%s-%s.%d%s", l.resolvedFilenameWithoutExt, base.Format(l.resolvedPattern), l.generation, l.resolvedFilenameExt) //l.resolvedPattern.FormatString(base)
 		return l.lastFilename
 	}
 	l.lastRotationTruncateTime = base
 	l.lastFilename = fmt.Sprintf("%s-%s%s", l.resolvedFilenameWithoutExt, base.Format(l.resolvedPattern), l.resolvedFilenameExt) //l.resolvedPattern.FormatString(base)
+	l.generation = 0
 	return l.lastFilename
 }
 

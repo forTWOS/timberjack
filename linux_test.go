@@ -59,8 +59,8 @@ func TestMaintainMode(t *testing.T) {
 
 	filename := logFile(dir)
 
-	mode := os.FileMode(0600)
-	f, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, mode)
+	mode := os.FileMode(0o600)
+	f, err := os.OpenFile(helperFilename(filename, defaultRotationInterval), os.O_CREATE|os.O_RDWR, mode)
 	isNil(err, t)
 	f.Close()
 
@@ -68,6 +68,7 @@ func TestMaintainMode(t *testing.T) {
 		Filename:   filename,
 		MaxBackups: 1,
 		MaxSize:    100, // megabytes
+		Pattern:    getPattern(),
 	}
 	defer l.Close()
 	b := []byte("boo!")
@@ -75,13 +76,15 @@ func TestMaintainMode(t *testing.T) {
 	isNil(err, t)
 	equals(len(b), n, t)
 
+	pretime := fakeTime()
+	preGeneration := l.generation
 	newFakeTime()
 
 	err = l.Rotate()
 	isNil(err, t)
 
-	filename2 := backupFileWithReason(dir, "size")
-	info, err := os.Stat(filename)
+	filename2 := backupFileWithReason(dir, "size", pretime, preGeneration)
+	info, err := os.Stat(l.CoarseFilename())
 	isNil(err, t)
 	info2, err := os.Stat(filename2)
 	isNil(err, t)
@@ -104,7 +107,7 @@ func TestMaintainOwner(t *testing.T) {
 
 	filename := logFile(dir)
 
-	f, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0644)
+	f, err := os.OpenFile(helperFilename(filename, defaultRotationInterval), os.O_CREATE|os.O_RDWR, 0644)
 	isNil(err, t)
 	f.Close()
 
@@ -125,9 +128,9 @@ func TestMaintainOwner(t *testing.T) {
 	err = l.Rotate()
 	isNil(err, t)
 
-	uid, gid, ok := fakeFS.Owner(filename)
+	uid, gid, ok := fakeFS.Owner(l.CoarseFilename())
 	if !ok {
-		t.Fatalf("owner for %s not recorded", filename)
+		t.Fatalf("owner for %s not recorded", l.CoarseFilename())
 	}
 	equals(555, uid, t)
 	equals(666, gid, t)
@@ -142,7 +145,7 @@ func TestCompressMaintainMode(t *testing.T) {
 	filename := logFile(dir)
 
 	mode := os.FileMode(0600)
-	f, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, mode)
+	f, err := os.OpenFile(helperFilename(filename, defaultRotationInterval), os.O_CREATE|os.O_RDWR, mode)
 	isNil(err, t)
 	f.Close()
 
@@ -151,6 +154,7 @@ func TestCompressMaintainMode(t *testing.T) {
 		Filename:   filename,
 		MaxBackups: 1,
 		MaxSize:    100, // megabytes
+		Pattern:    getPattern(),
 	}
 	defer l.Close()
 	b := []byte("boo!")
@@ -158,6 +162,8 @@ func TestCompressMaintainMode(t *testing.T) {
 	isNil(err, t)
 	equals(len(b), n, t)
 
+	pretime := fakeTime()
+	preGeneration := l.generation
 	newFakeTime()
 
 	err = l.Rotate()
@@ -169,8 +175,8 @@ func TestCompressMaintainMode(t *testing.T) {
 
 	// a compressed version of the log file should now exist with the correct
 	// mode.
-	filename2 := backupFileWithReason(dir, "size")
-	info, err := os.Stat(filename)
+	filename2 := backupFileWithReason(dir, "size", pretime, preGeneration)
+	info, err := os.Stat(l.CoarseFilename())
 	isNil(err, t)
 	info2, err := os.Stat(filename2 + compressSuffix)
 	isNil(err, t)
@@ -193,7 +199,7 @@ func TestCompressMaintainOwner(t *testing.T) {
 
 	filename := logFile(dir)
 
-	f, err := os.OpenFile(filename, os.O_CREATE|os.O_RDWR, 0644)
+	f, err := os.OpenFile(helperFilename(filename, defaultRotationInterval), os.O_CREATE|os.O_RDWR, 0644)
 	isNil(err, t)
 	f.Close()
 
@@ -202,6 +208,7 @@ func TestCompressMaintainOwner(t *testing.T) {
 		Filename:   filename,
 		MaxBackups: 1,
 		MaxSize:    100, // megabytes
+		Pattern:    getPattern(),
 	}
 	defer l.Close()
 
@@ -210,6 +217,8 @@ func TestCompressMaintainOwner(t *testing.T) {
 	isNil(err, t)
 	equals(len(b), n, t)
 
+	pretime := fakeTime()
+	preGeneration := l.generation
 	newFakeTime()
 
 	err = l.Rotate()
@@ -219,7 +228,7 @@ func TestCompressMaintainOwner(t *testing.T) {
 	<-time.After(10 * time.Millisecond)
 
 	// check owner of compressed backup
-	filename2 := backupFileWithReason(dir, "size")
+	filename2 := backupFileWithReason(dir, "size", pretime, preGeneration)
 	name := filename2 + compressSuffix
 
 	uid, gid, ok := fakeFS.Owner(name)
