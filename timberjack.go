@@ -33,6 +33,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strconv"
@@ -218,6 +219,7 @@ type Logger struct {
 	startMill     sync.Once      // ensures mill goroutine is started only once
 	millWg        sync.WaitGroup // waits for the mill goroutine to finish
 	millWGStarted bool
+	millCount     int64
 
 	// For scheduled rotation goroutine (RotateAt)
 	startScheduledRotationOnce sync.Once      // ensures scheduled rotation goroutine is started only once
@@ -225,6 +227,7 @@ type Logger struct {
 	scheduledRotationWg        sync.WaitGroup // waits for the scheduled rotation goroutine to finish
 	processedRotateAt          []rotateAt     // internal storage for sorted and validated RotateAt
 	isClosed                   uint32
+	scheduledCount             int64
 
 	// snapshots of globals to avoid races
 	resolvedTimeNow func() time.Time
@@ -533,10 +536,7 @@ func (l *Logger) runScheduledRotations(quit <-chan struct{}, slots []rotateAt, l
 	timer := time.NewTimer(0) // Timer will be reset with the correct duration in the loop
 	if !timer.Stop() {
 		// Drain the channel if the timer fired prematurely (e.g., duration was 0 on first NewTimer)
-		select {
-		case <-timer.C:
-		default:
-		}
+		<-timer.C
 	}
 
 	for {
@@ -584,13 +584,14 @@ func (l *Logger) runScheduledRotations(quit <-chan struct{}, slots []rotateAt, l
 
 		select {
 		case <-timer.C: // Timer fired, it's time for a scheduled rotation
+			atomic.AddInt64(&l.scheduledCount, 1)
 			l.mu.Lock()
 			// Only rotate if the last rotation time was before this specific scheduled mark.
 			// This prevents redundant rotations if another rotation (e.g., size/interval) happened
 			// very close to, but just before or at, this scheduled time for the same mark.
 			if l.lastRotationTime.Before(nextRotationAbsoluteTime) {
 				if err := l.rotate("time"); err != nil { // Scheduled rotations are "time" based for filename
-					fmt.Fprintf(os.Stderr, "timberjack: [%s] scheduled rotation failed: %v\n", l.filename(), err)
+					fmt.Fprintf(os.Stderr, "timberjack: [%s] rotationTime[%s,%s,%s, %s] scheduled rotation failed: %v\n", l.filename(), l.lastRotationTime, nextRotationAbsoluteTime, nowFn(), sleepDuration, err)
 				} else {
 					l.lastRotationTime = nowFn()
 				}
@@ -607,6 +608,7 @@ func (l *Logger) runScheduledRotations(quit <-chan struct{}, slots []rotateAt, l
 				default:
 				}
 			}
+			//fmt.Fprintf(os.Stderr, "succ\n")
 			return // Exit goroutine
 		}
 	}
@@ -617,11 +619,11 @@ func (l *Logger) runScheduledRotations(quit <-chan struct{}, slots []rotateAt, l
 func (l *Logger) Close() error {
 	l.mu.Lock()
 
-	if atomic.LoadUint32(&l.isClosed) == 1 {
+	// Set isClosed to 1 if it was previously 0. Subsequent calls will see isClosed as 1.
+	if !atomic.CompareAndSwapUint32(&l.isClosed, 0, 1) {
 		l.mu.Unlock()
 		return nil
 	}
-	atomic.StoreUint32(&l.isClosed, 1)
 
 	// Stop the scheduled rotation goroutine
 	var quitCh chan struct{}
@@ -660,6 +662,9 @@ func (l *Logger) Close() error {
 func (l *Logger) closeFile() error {
 	if l.file == nil {
 		return nil
+	}
+	if runtime.GOOS == "windows" {
+		l.file.Sync() // Best effort to flush before closing, ignore errors
 	}
 	err := l.file.Close()
 	l.file = nil // Set to nil to indicate it's closed.
@@ -951,6 +956,7 @@ func (l *Logger) millRunOnce() error {
 	if l.MaxBackups == 0 && l.MaxAge == 0 && comp == "none" {
 		return nil // Nothing to do if all cleanup options are disabled.
 	}
+	defer atomic.AddInt64(&l.millCount, 1)
 
 	now := l.resolvedTimeNow()
 
@@ -1326,6 +1332,9 @@ func (l *Logger) compressLogFile(src, dst string) error {
 		return fmt.Errorf("failed to write compressed data to %s: %w", dst, copyErr)
 	}
 
+	if runtime.GOOS == "windows" {
+		dstFile.Sync() // Best effort to flush before closing, ignore errors
+	}
 	if err := dstFile.Close(); err != nil { // Close destination file
 		// Data is likely written and compressor closed successfully, but closing the file descriptor failed.
 		// The destination file might still be valid on disk. We typically wouldn't remove dst here
@@ -1347,6 +1356,9 @@ func (l *Logger) compressLogFile(src, dst string) error {
 	// On Windows, you cannot delete an open file. The defer srcFile.Close() won't execute
 	// until this function returns, so we must close it here before calling resolvedRemove().
 	// This prevents "The process cannot access the file because it is being used" errors.
+	if runtime.GOOS == "windows" {
+		srcFile.Sync() // Best effort to flush before closing, ignore errors
+	}
 	if err := srcFile.Close(); err != nil {
 		// Log the close error but continue with removal attempt
 		fmt.Fprintf(os.Stderr, "timberjack: [%s] failed to close source file before removal: %v\n", filepath.Base(src), err)

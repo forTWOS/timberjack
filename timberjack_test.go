@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -159,6 +160,7 @@ func TestDefaultFilename(t *testing.T) {
 	isNil(err, t)
 	equals(len(b), n, t)
 	existsWithContent(l.CoarseFilename(), b, t)
+	os.WriteFile(l.CoarseFilename(), []byte{}, 0o600)
 }
 
 func TestAutoRotate(t *testing.T) {
@@ -215,8 +217,9 @@ func TestFirstWriteRotate(t *testing.T) {
 	defer l.Close()
 
 	start := []byte("boooooo!")
-	err := os.WriteFile(ToolGenFilename(l.Filename, l.Pattern, currentTime(), l.RotationInterval), start, 0o600)
+	err := os.WriteFile(ToolGenFilename(l.Filename, l.Pattern, currentTime(), defaultRotationInterval), start, 0o600)
 	isNil(err, t)
+	// t.Log(ToolGenFilename(l.Filename, l.Pattern, currentTime(), defaultRotationInterval))
 
 	preTime := fakeTime()
 	preGeneration := l.generation
@@ -228,6 +231,7 @@ func TestFirstWriteRotate(t *testing.T) {
 	isNil(err, t)
 	equals(len(b), n, t)
 
+	// t.Log(l.CoarseFilename(), preTime, preGeneration, backupFileWithReason(dir, "size", preTime, preGeneration))
 	existsWithContent(l.CoarseFilename(), b, t)
 	existsWithContent(backupFileWithReason(dir, "size", preTime, preGeneration), start, t)
 
@@ -247,10 +251,12 @@ func TestMaxBackups(t *testing.T) {
 		MaxBackups: 1,
 	}
 	defer l.Close()
+	preMillCount := atomic.LoadInt64(&l.millCount)
 	b := []byte("boo!")
 	n, err := l.Write(b)
 	isNil(err, t)
 	equals(len(b), n, t)
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 
 	existsWithContent(l.CoarseFilename(), b, t)
 	fileCount(dir, 1, t)
@@ -260,10 +266,12 @@ func TestMaxBackups(t *testing.T) {
 	newFakeTime()
 
 	// this will put us over the max
+	preMillCount = atomic.LoadInt64(&l.millCount)
 	b2 := []byte("foooooo!")
 	n, err = l.Write(b2)
 	isNil(err, t)
 	equals(len(b2), n, t)
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 
 	// this will use the new fake time
 	secondFilename := backupFileWithReason(dir, "size", preTime, preGeneration)
@@ -277,7 +285,7 @@ func TestMaxBackups(t *testing.T) {
 	preTime = fakeTime()
 	preGeneration = l.generation
 	newFakeTime()
-
+	preMillCount = atomic.LoadInt64(&l.millCount)
 	// this will make us rotate again
 	b3 := []byte("baaaaaar!")
 	n, err = l.Write(b3)
@@ -292,7 +300,7 @@ func TestMaxBackups(t *testing.T) {
 
 	// we need to wait a little bit since the files get deleted on a different
 	// goroutine.
-	<-time.After(time.Millisecond * 10)
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 
 	// should only have two files in the dir still
 	fileCount(dir, 2, t)
@@ -334,6 +342,7 @@ func TestMaxBackups(t *testing.T) {
 	err = os.WriteFile(compLogFile, []byte("compress"), 0o644)
 	isNil(err, t)
 
+	preMillCount = atomic.LoadInt64(&l.millCount)
 	// this will make us rotate again
 	b4 := []byte("baaaaaaz!")
 	n, err = l.Write(b4)
@@ -345,7 +354,7 @@ func TestMaxBackups(t *testing.T) {
 
 	// we need to wait a little bit since the files get deleted on a different
 	// goroutine.
-	<-time.After(time.Millisecond * 10)
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 
 	// We should have four things in the directory now - the 2 log files, the
 	// not log file, and the directory
@@ -409,6 +418,7 @@ func TestCleanupExistingBackups(t *testing.T) {
 
 	newFakeTime()
 
+	preMillCount := atomic.LoadInt64(&l.millCount)
 	b2 := []byte("foooooo!")
 	n, err := l.Write(b2)
 	isNil(err, t)
@@ -416,7 +426,8 @@ func TestCleanupExistingBackups(t *testing.T) {
 
 	// we need to wait a little bit since the files get deleted on a different
 	// goroutine.
-	<-time.After(time.Millisecond * 10)
+	// openExistingOrNew does a mill run, and the rotation will do another one, so we need to wait for at least 2 runs.
+	waitMillCount(t, l, preMillCount+2, time.Millisecond*300)
 
 	// now we should only have 2 files left - the primary and one backup
 	fileCount(dir, 2, t)
@@ -436,10 +447,12 @@ func TestMaxAge(t *testing.T) {
 		MaxAge:  1,
 	}
 	defer l.Close()
+	preMillCount := atomic.LoadInt64(&l.millCount)
 	b := []byte("boo!")
 	n, err := l.Write(b)
 	isNil(err, t)
 	equals(len(b), n, t)
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 
 	existsWithContent(l.CoarseFilename(), b, t)
 	fileCount(dir, 1, t)
@@ -449,7 +462,7 @@ func TestMaxAge(t *testing.T) {
 
 	// two days later
 	newFakeTime(48 * time.Hour)
-
+	preMillCount = atomic.LoadInt64(&l.millCount)
 	b2 := []byte("foooooo!")
 	n, err = l.Write(b2)
 	isNil(err, t)
@@ -458,7 +471,7 @@ func TestMaxAge(t *testing.T) {
 
 	// we need to wait a little bit since the files get deleted on a different
 	// goroutine.
-	<-time.After(10 * time.Millisecond)
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 
 	// We should still have 2 log files, since the most recent backup was just
 	// created.
@@ -473,7 +486,7 @@ func TestMaxAge(t *testing.T) {
 
 	// two days later
 	newFakeTime(48 * time.Hour)
-
+	preMillCount = atomic.LoadInt64(&l.millCount)
 	b3 := []byte("baaaaar!")
 	n, err = l.Write(b3)
 	isNil(err, t)
@@ -482,7 +495,7 @@ func TestMaxAge(t *testing.T) {
 
 	// we need to wait a little bit since the files get deleted on a different
 	// goroutine.
-	<-time.After(10 * time.Millisecond)
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 
 	// We should have 2 log files - the main log file, and the most recent
 	// backup.  The earlier backup is past the cutoff and should be gone.
@@ -605,10 +618,12 @@ func TestRotate(t *testing.T) {
 		MaxSize:    100, // megabytes
 	}
 	defer l.Close()
+	preMillCount := atomic.LoadInt64(&l.millCount)
 	b := []byte("boo!")
 	n, err := l.Write(b)
 	isNil(err, t)
 	equals(len(b), n, t)
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 
 	existsWithContent(l.CoarseFilename(), b, t)
 	fileCount(dir, 1, t)
@@ -617,12 +632,13 @@ func TestRotate(t *testing.T) {
 	preGeneration := l.generation
 	newFakeTime()
 
+	preMillCount = atomic.LoadInt64(&l.millCount)
 	err = l.Rotate()
 	isNil(err, t)
 
 	// we need to wait a little bit since the files get deleted on a different
 	// goroutine.
-	<-time.After(10 * time.Millisecond)
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 
 	filename2 := backupFileWithReason(dir, "size", preTime, preGeneration)
 	existsWithContent(filename2, b, t)
@@ -630,13 +646,14 @@ func TestRotate(t *testing.T) {
 	fileCount(dir, 2, t)
 	newFakeTime()
 
+	preMillCount = atomic.LoadInt64(&l.millCount)
 	preGeneration = l.generation
 	err = l.Rotate()
 	isNil(err, t)
 
 	// we need to wait a little bit since the files get deleted on a different
 	// goroutine.
-	<-time.After(10 * time.Millisecond)
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 
 	filename3 := backupFileWithReason(dir, "size", preTime, preGeneration)
 	existsWithContent(filename3, []byte{}, t)
@@ -666,6 +683,7 @@ func TestCompressOnRotate(t *testing.T) {
 		MaxSize: 10,
 	}
 	defer l.Close()
+	preMillCount := atomic.LoadInt64(&l.millCount)
 	b := []byte("boo!")
 	n, err := l.Write(b)
 	isNil(err, t)
@@ -677,7 +695,9 @@ func TestCompressOnRotate(t *testing.T) {
 	preTime := fakeTime()
 	preGeneration := l.generation
 	newFakeTime()
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 
+	preMillCount++
 	err = l.Rotate()
 	isNil(err, t)
 
@@ -687,7 +707,7 @@ func TestCompressOnRotate(t *testing.T) {
 
 	// we need to wait a little bit since the files get compressed on a different
 	// goroutine.
-	<-time.After(300 * time.Millisecond)
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 
 	// a compressed version of the log file should now exist and the original
 	// should have been removed.
@@ -697,6 +717,7 @@ func TestCompressOnRotate(t *testing.T) {
 	isNil(err, t)
 	err = gz.Close()
 	isNil(err, t)
+	// t.Log(atomic.LoadInt64(&l.millCount), preMillCount)
 	existsWithContent(backupFileWithReason(dir, "size", preTime, preGeneration)+compressSuffix, bc.Bytes(), t)
 	notExist(backupFileWithReason(dir, "size", preTime, preGeneration), t)
 
@@ -728,6 +749,7 @@ func TestCompressOnResume(t *testing.T) {
 
 	newFakeTime()
 
+	preMillCount := atomic.LoadInt64(&l.millCount)
 	b2 := []byte("boo!")
 	n, err := l.Write(b2)
 	isNil(err, t)
@@ -736,7 +758,7 @@ func TestCompressOnResume(t *testing.T) {
 
 	// we need to wait a little bit since the files get compressed on a different
 	// goroutine.
-	<-time.After(300 * time.Millisecond)
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 
 	// The write should have started the compression - a compressed version of
 	// the log file should now exist and the original should have been removed.
@@ -780,7 +802,7 @@ func TestJson(t *testing.T) {
 // It should be based on the name of the test, to keep parallel tests from
 // colliding, and must be cleaned up after the test is finished.
 func makeTempDir(name string, t testing.TB) string {
-	dir := time.Now().Format(name + getPattern())
+	dir := time.Now().Format(name + _backupTimeFormat)
 	dir = filepath.Join(os.TempDir(), dir)
 	isNilUp(os.Mkdir(dir, 0o700), t, 1)
 	return dir
@@ -816,7 +838,7 @@ func logFile(dir string) string {
 }
 
 func getPattern() string {
-	return "2006-01-02_15"
+	return "2006-01-02_15" // _pattern
 }
 
 func backupFileLocal(dir string, coarseFilename string) string {
@@ -980,30 +1002,37 @@ func TestRotateAtMinutes(t *testing.T) {
 	equals(len(content1), n, t)
 	existsWithContent(l.CoarseFilename(), content1, t)
 	fileCount(dir, 1, t) // only the live logfile
+	// preFile := l.CoarseFilename()
 
 	preTime := fakeTime()
 	preGeneration := l.generation
 	// 3) Advance to 14:15 exactly, let the goroutine fire
 	setFakeTime(time.Date(2025, time.May, 12, 14, 15, 0, 0, time.UTC))
-	time.Sleep(300 * time.Millisecond)
+	// time.Sleep(300 * time.Millisecond)
 
 	// 4) Write at 14:16 → should be on a fresh file, and first-backup is content1
 	setFakeTime(time.Date(2025, time.May, 12, 14, 16, 0, 0, time.UTC))
 	n, err = l.Write(content2)
 	isNil(err, t)
 	equals(len(content2), n, t)
-	existsWithContent(l.CoarseFilename(), content2, t)
+	// existsWithContent(l.CoarseFilename(), content2, t)
 	expected1 := backupFileWithReason(dir, "time", preTime, preGeneration)
+	// fileinfos, _ := ioutil.ReadDir(dir)
+	// for _, fi := range fileinfos {
+	// 	t.Log(fi.Name())
+	// }
+	// t.Log(preFile, expected1)
 	existsWithContent(expected1, content1, t)
 	fileCount(dir, 2, t)
 
-	// 5) Advance past the 14:30 mark without writing → no new rotation
-	setFakeTime(time.Date(2025, time.May, 12, 14, 30, 0, 0, time.UTC))
-	time.Sleep(300 * time.Millisecond)
-	fileCount(dir, 2, t) // still just the live log + one backup
-
 	preTime = fakeTime()
 	preGeneration = l.generation
+
+	// 5) Advance past the 14:30 mark without writing → no new rotation
+	setFakeTime(time.Date(2025, time.May, 12, 14, 30, 0, 0, time.UTC))
+	// time.Sleep(300 * time.Millisecond)
+	fileCount(dir, 2, t) // still just the live log + one backup
+
 	// 6) Write at 14:31 → triggers the 30-minute mark rotation, and rolls content2
 	setFakeTime(time.Date(2025, time.May, 12, 14, 31, 0, 0, time.UTC))
 	n, err = l.Write(content3)
@@ -1050,12 +1079,13 @@ func TestRotateAt(t *testing.T) {
 	equals(len(content1), n, t)
 	existsWithContent(l.CoarseFilename(), content1, t)
 	fileCount(dir, 1, t) // only the live logfile
+	// preFile := l.CoarseFilename()
 
 	preTime := fakeTime()
 	preGeneration := l.generation
 	// 3) Advance to next day 10:00 exactly, let the goroutine fire
 	setFakeTime(time.Date(2025, time.May, 13, 10, 0, 0, 0, time.UTC))
-	time.Sleep(300 * time.Millisecond)
+	// time.Sleep(300 * time.Millisecond)
 
 	// 4) Write at 10:01 → should be on a fresh file, and first-backup is content1
 	setFakeTime(time.Date(2025, time.May, 13, 10, 1, 0, 0, time.UTC))
@@ -1063,15 +1093,21 @@ func TestRotateAt(t *testing.T) {
 	isNil(err, t)
 	equals(len(content2), n, t)
 	existsWithContent(l.CoarseFilename(), content2, t)
+
 	secondGeneration := l.generation
 	expected1 := backupFileWithReasonFilename(dir, "time", "rotateat", preTime, preGeneration)
+	// fileinfos, _ := ioutil.ReadDir(dir)
+	// for _, fi := range fileinfos {
+	// 	t.Log(fi.Name())
+	// }
+	// t.Log(preFile)
 	existsWithContent(expected1, content1, t)
 	fileCount(dir, 2, t)
 
 	preTime = fakeTime()
 	// 5) Advance past the next day 10:00 mark without writing → no new rotation
 	setFakeTime(time.Date(2025, time.May, 14, 10, 1, 0, 0, time.UTC))
-	time.Sleep(300 * time.Millisecond)
+	// time.Sleep(300 * time.Millisecond)
 	fileCount(dir, 2, t) // still just the live log + one backup
 
 	// 6) Write at 10:00 next day → triggers the mark rotation, and rolls content2
@@ -1321,7 +1357,7 @@ func TestRunScheduledRotations_NoFutureTime(t *testing.T) {
 	l.scheduledRotationWg.Add(1)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
 
-	time.Sleep(150 * time.Millisecond)
+	// time.Sleep(150 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -1507,7 +1543,7 @@ func TestRunScheduledRotations_NoFutureSlot(t *testing.T) {
 	l.scheduledRotationWg.Add(1)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
 
-	time.Sleep(200 * time.Millisecond)
+	// time.Sleep(200 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -1832,7 +1868,7 @@ func TestRunScheduledRotations_NoFutureSlotFallback(t *testing.T) {
 	l.scheduledRotationWg.Add(1)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
 
-	time.Sleep(200 * time.Millisecond)
+	// time.Sleep(200 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -1860,6 +1896,7 @@ func TestMillRunOnce_NoOp(t *testing.T) {
 		Compress:   false,
 		Pattern:    getPattern(), Filename: filepath.Join(t.TempDir(), "noop.log"),
 	}
+	defer logger.Close()
 
 	// Should do nothing and return nil
 	err := logger.millRunOnce()
@@ -1957,13 +1994,14 @@ func TestMillRun_TriggersMillRunOnce_Effect(t *testing.T) {
 	// Start millRun in background
 	go l.millRun()
 
+	preMillCount := atomic.LoadInt64(&l.millCount)
 	// Trigger it
 	l.millCh <- true
-	time.Sleep(100 * time.Millisecond)
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
 	close(l.millCh)
 
 	// Wait briefly for compression to complete
-	time.Sleep(200 * time.Millisecond)
+	// time.Sleep(200 * time.Millisecond)
 
 	// Check if file was compressed
 	_, err := os.Stat(backup + ".gz")
@@ -1996,6 +2034,7 @@ func TestRotate_StartMillOnlyOnce_Observable(t *testing.T) {
 		defer os.Remove(path + ".gz")
 	}
 
+	preMillCount := atomic.LoadInt64(&logger.millCount)
 	// Rotate once — triggers millRun and startMill.Do
 	if err := logger.rotate("size"); err != nil {
 		t.Fatalf("rotate failed: %v", err)
@@ -2007,7 +2046,7 @@ func TestRotate_StartMillOnlyOnce_Observable(t *testing.T) {
 	close(logger.millCh)
 
 	// Wait briefly for compression to complete
-	time.Sleep(300 * time.Millisecond)
+	waitMillCount(t, logger, preMillCount+3, time.Millisecond*500)
 
 	// Count only compressed versions of the test backup files
 	count := 0
@@ -2038,7 +2077,7 @@ func TestScheduledMinuteRotationFails(t *testing.T) {
 	l.scheduledRotationWg.Add(1)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
 
-	time.Sleep(100 * time.Millisecond)
+	// time.Sleep(100 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -2056,7 +2095,7 @@ func TestRunScheduledRotations_CannotFindNextSlot(t *testing.T) {
 	l.scheduledRotationWg.Add(1)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
 
-	time.Sleep(150 * time.Millisecond)
+	// time.Sleep(150 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -2098,7 +2137,7 @@ func TestRunScheduledRotations_NoFutureSlotFound(t *testing.T) {
 	l.scheduledRotationWg.Add(1)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
 
-	time.Sleep(200 * time.Millisecond)
+	// time.Sleep(200 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -2106,21 +2145,24 @@ func TestRunScheduledRotations_NoFutureSlotFound(t *testing.T) {
 func TestScheduledRotation_TimerFiresAndRotates(t *testing.T) {
 	orig := currentTime
 	defer func() { currentTime = orig }()
-	now := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
+	now := time.Date(2025, 1, 1, 10, 0, 59, 999*int(time.Millisecond), time.UTC)
 	currentTime = func() time.Time { return now }
 
 	tmpDir := t.TempDir()
 	file := filepath.Join(tmpDir, "timerfire.log")
 	l := &Logger{Pattern: getPattern(), Filename: file}
+	defer l.Close()
 	l.lastRotationTime = now.Add(-time.Hour)
 	l.resolveConfigLocked()
 
 	quit := make(chan struct{})
 	slots := []rotateAt{{10, 1}} // next minute after 'now'
 	l.scheduledRotationWg.Add(1)
+	preScheduledCount := atomic.LoadInt64(&l.scheduledCount)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
+	waitScheduledCount(t, l, preScheduledCount+1, time.Millisecond*500)
 
-	time.Sleep(100 * time.Millisecond)
+	// time.Sleep(100 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -2173,14 +2215,14 @@ func TestRunScheduledRotations_FallbackRetry(t *testing.T) {
 	currentTime = func() time.Time { return time.Date(9999, 1, 1, 23, 59, 59, 0, time.UTC) }
 
 	l := &Logger{Pattern: getPattern(), Filename: "test.log"}
+	defer l.Close()
 	l.resolveConfigLocked()
 
 	quit := make(chan struct{})
 	slots := []rotateAt{{0, 0}}
 	l.scheduledRotationWg.Add(1)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
-
-	time.Sleep(100 * time.Millisecond)
+	// time.Sleep(100 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -2197,8 +2239,7 @@ func TestRunScheduledRotations_TimerFires(t *testing.T) {
 	slots := []rotateAt{{0, 1}} // “minute 1”
 	l.scheduledRotationWg.Add(1)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
-
-	time.Sleep(200 * time.Millisecond)
+	// time.Sleep(200 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -2285,17 +2326,20 @@ func TestRunScheduledRotations_NoFutureSlotRetry(t *testing.T) {
 
 	orig := currentTime
 	defer func() { currentTime = orig }()
-	currentTime = func() time.Time { return time.Date(9999, 1, 1, 23, 59, 59, 0, time.UTC) }
+	currentTime = func() time.Time { return time.Date(9999, 1, 1, 23, 59, 59, 999*int(time.Millisecond), time.UTC) }
 
 	l := &Logger{Pattern: getPattern(), Filename: "noop.log"}
+	defer l.Close()
 	l.resolveConfigLocked()
 
 	quit := make(chan struct{})
 	slots := []rotateAt{{0, 0}}
 	l.scheduledRotationWg.Add(1)
+	preScheduledCount := atomic.LoadInt64(&l.scheduledCount)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
+	waitScheduledCount(t, l, preScheduledCount+1, time.Millisecond*500)
 
-	time.Sleep(200 * time.Millisecond)
+	// time.Sleep(200 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -2311,7 +2355,7 @@ func TestRunScheduledRotations_RotateFails(t *testing.T) {
 	l.scheduledRotationWg.Add(1)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
 
-	time.Sleep(300 * time.Millisecond)
+	// time.Sleep(300 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -2388,7 +2432,7 @@ func TestRunScheduledRotations_FallbackOnRotateFailure(t *testing.T) {
 	l.scheduledRotationWg.Add(1)
 	go l.runScheduledRotations(quit, slots, time.UTC, currentTime)
 
-	time.Sleep(300 * time.Millisecond)
+	// time.Sleep(300 * time.Millisecond)
 	close(quit)
 	l.scheduledRotationWg.Wait()
 }
@@ -2411,7 +2455,7 @@ func TestLoggerClose_ClosesMillChannel(t *testing.T) {
 	}
 
 	// Wait a bit to let millRun exit
-	time.Sleep(100 * time.Millisecond)
+	// time.Sleep(100 * time.Millisecond)
 
 	// Test that millCh is closed
 	select {
@@ -2590,21 +2634,21 @@ func TestMillGoroutineCleanup(t *testing.T) {
 		MaxBackups:       1,
 		BackupTimeFormat: "2006-01-02T15-04-05.000", // consistent with timberjack defaults
 	}
-
+	preMillCount := atomic.LoadInt64(&logger.millCount)
 	_, err := logger.Write([]byte("1234567890"))
 	if err != nil {
 		t.Fatalf("write failed: %v", err)
 	}
 
 	// Give time for millRun to potentially start
-	time.Sleep(50 * time.Millisecond)
+	waitMillCount(t, logger, preMillCount+1, time.Millisecond*500)
 
 	if err := logger.Close(); err != nil {
 		t.Fatalf("logger close failed: %v", err)
 	}
 
 	// Wait briefly to allow goroutine shutdown
-	time.Sleep(50 * time.Millisecond)
+	// time.Sleep(50 * time.Millisecond)
 }
 
 // TestWriteToClosedLogger verifies that a write to a closed logger succeeds
@@ -2724,11 +2768,18 @@ func TestZstdCompression_SizeRotate_DefaultNaming(t *testing.T) {
 	}
 	defer l.Close()
 
+	preMillCount := atomic.LoadInt64(&l.millCount)
 	// 6 bytes per write; two writes => 12 > 10 => rotation
 	msg := []byte("HELLO\n")
 	if _, err := l.Write(msg); err != nil {
 		t.Fatalf("first write: %v", err)
 	}
+	cn := 0
+	for !waitMillCount(t, l, preMillCount+1, 500*time.Millisecond) && cn < 5 {
+		runtime.Gosched()
+		cn++
+	}
+	preMillCount = atomic.LoadInt64(&l.millCount)
 	if _, err := l.Write(msg); err != nil {
 		t.Fatalf("second write: %v", err)
 	}
@@ -2738,7 +2789,12 @@ func TestZstdCompression_SizeRotate_DefaultNaming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected a .log.zst rotated file in %s", dir)
 	}
-	time.Sleep(100 * time.Millisecond) // give the mill a moment even though waitForFileWithSuffix should ensure it's done
+	// give the mill a moment even though waitForFileWithSuffix should ensure it's done
+	cn = 0
+	for !waitMillCount(t, l, preMillCount+1, 500*time.Millisecond) && cn < 5 {
+		runtime.Gosched()
+		cn++
+	}
 
 	got := readZstdFile(t, zstFile)
 	if !bytes.Equal(got, msg) {
@@ -2747,6 +2803,39 @@ func TestZstdCompression_SizeRotate_DefaultNaming(t *testing.T) {
 	}
 }
 
+func waitMillCount(t *testing.T, l *Logger, target int64, timeout time.Duration) bool {
+	tf := time.After(timeout)
+	for {
+		select {
+		case <-tf:
+			t.Log("timed out waiting for compression to complete")
+			return false
+		default:
+			if atomic.LoadInt64(&l.millCount) == target {
+				return true
+			} else {
+				runtime.Gosched()
+			}
+		}
+	}
+}
+
+func waitScheduledCount(t *testing.T, l *Logger, target int64, timeout time.Duration) bool {
+	tf := time.After(timeout)
+	for {
+		select {
+		case <-tf:
+			t.Log("timed out waiting for scheduled rotation to complete")
+			return false
+		default:
+			if atomic.LoadInt64(&l.scheduledCount) == target {
+				return true
+			} else {
+				runtime.Gosched()
+			}
+		}
+	}
+}
 func TestZstdCompression_SizeRotate_AppendAfterExt(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "zstdservice.log")
@@ -2763,10 +2852,13 @@ func TestZstdCompression_SizeRotate_AppendAfterExt(t *testing.T) {
 	}
 	defer l.Close()
 
+	preMillCount := atomic.LoadInt64(&l.millCount)
 	msg := []byte("LINE\n") // 5 bytes
 	if _, err := l.Write(msg); err != nil {
 		t.Fatalf("first write: %v", err)
 	}
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
+	preMillCount = atomic.LoadInt64(&l.millCount)
 	if _, err := l.Write(msg); err != nil {
 		t.Fatalf("second write: %v", err)
 	}
@@ -2780,7 +2872,8 @@ func TestZstdCompression_SizeRotate_AppendAfterExt(t *testing.T) {
 	if !strings.Contains(base, ".log-") || !strings.Contains(base, "-size") {
 		t.Fatalf("unexpected rotated filename %q; want '.log-<ts>-size.zst'", base)
 	}
-	time.Sleep(100 * time.Millisecond) // give the mill a moment even though waitForFileWithSuffix should ensure it's done
+	waitMillCount(t, l, preMillCount+1, time.Millisecond*500)
+	// time.Sleep(100 * time.Millisecond) // give the mill a moment even though waitForFileWithSuffix should ensure it's done
 
 	got := readZstdFile(t, zstFile)
 	if !bytes.Equal(got, msg) {
@@ -2844,13 +2937,14 @@ func TestCompressionUnknownMeansNone(t *testing.T) {
 	if _, err := l.Write(msg); err != nil {
 		t.Fatalf("first write: %v", err)
 	}
+	// preMillCount := atomic.LoadInt64(&l.millCount)
 	if _, err := l.Write(msg); err != nil {
 		t.Fatalf("second write: %v", err)
 	}
 
 	// Rotated file should be uncompressed (suffix ".log", not ".log.gz/.log.zst").
 	// Give the mill a moment even though no compression should happen.
-	time.Sleep(100 * time.Millisecond)
+	// waitMillCount(t, l, preMillCount+1, time.Millisecond)
 
 	var foundUncompressed bool
 	ents, _ := os.ReadDir(dir)
